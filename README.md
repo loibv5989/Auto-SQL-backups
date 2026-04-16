@@ -1,8 +1,6 @@
 # SQL Backup Tool for Linux
 A tool for automating SQL database backups and sending email notifications with attachments.
 
-![Auto Backup SQL](https://itsmeit.co/wp-content/uploads/2025/01/auto-sql-backups.png)
-
 ## Requirements:
 - **Linux** or Linux-based distributions
 - **Mail service**: Sendmail, Exim4, or Postfix (required if sending email attachments)
@@ -31,6 +29,5 @@ A tool for automating SQL database backups and sending email notifications with 
 ---
 ## Contact support: 
 - Email: buivanloi.2010@gmail.com
-- Facebook: https://facebook.com/itsmeit.co
-- Website: https://itsmeit.co/
-- Document: https://itsmeit.co/how-to-auto-backup-mysql-databases-linux/
+- Facebook: https://facebook.com/omgidol.bz
+- Website: https://omgidol.com/
