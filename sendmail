@@ -7,155 +7,128 @@ if [ ! -f "$CONFIG_FILE" ]; then
   exit 1
 fi
 
+CONFIG_OWNER=$(stat -c '%u' "$CONFIG_FILE")
+CONFIG_MODE=$(stat -c '%a' "$CONFIG_FILE")
+if [ "$CONFIG_OWNER" != "0" ] || [ "$CONFIG_MODE" != "600" ]; then
+  echo "ERROR: $CONFIG_FILE must be owned by root and chmod 600. Aborting."
+  exit 1
+fi
+
 source "$CONFIG_FILE"
 
-# === Hàm tiện ích ===
+# WARNING, LOG_FILE, ATTACHMENT_FILES duoc export tu runsqlbackup
+# Neu chay doc lap, dat gia tri mac dinh de tranh loi
+WARNING="${WARNING:-0}"
+LOG_FILE="${LOG_FILE:-/tmp/sqlbackup_standalone.log}"
+ATTACHMENT_FILES="${ATTACHMENT_FILES:-}"
+
 is_installed() {
   command -v "$1" >/dev/null 2>&1
 }
 
 supports_mail_attach() {
   mail -A /dev/null -s "test" --version >/dev/null 2>&1
-  return $?
 }
 
-# === Kiểm tra các dịch vụ email ===
 EMAIL_SERVICE_INSTALLED=false
 if is_installed sendmail || is_installed exim4 || is_installed postfix; then
   EMAIL_SERVICE_INSTALLED=true
 fi
 
-# === Thông tin mail mặc định ===
 if [ -f /etc/mailname ]; then
   HOST_MAIL=$(cat /etc/mailname)
 else
   HOST_MAIL=$(hostname -f 2>/dev/null || hostname)
 fi
-
 EMAIL_FROM="noreply@${HOST_MAIL}"
 
-# === Cảnh báo nếu thiếu dung lượng ===
-if [ "$WARNING" = 1 ] && [ -n "$EMAIL_TO" ]; then
-  echo -e "Subject: WARNING [SQL Backup]: Disk full - Immediate action required\n\nDear User,\n\nThis is to inform you that the disk space is almost full, and there is not enough space to perform a backup of the database. Please take immediate action to free up space.\n\nThank you,\nSystem Administrator" \
-  | mail -s "WARNING: Disk full - Immediate action required" -a "From: $EMAIL_FROM" "$EMAIL_TO"
+if [ "$WARNING" = "1" ] && [ -n "$EMAIL_TO" ]; then
+  printf "Subject: WARNING [SQL Backup]: Disk full\n\nDisk space is insufficient to perform a backup. Please free up space immediately.\n\nSystem Administrator\n" \
+    | mail -s "WARNING: Disk full - SQL Backup aborted" -a "From: $EMAIL_FROM" "$EMAIL_TO"
   exit 1
 fi
 
-# === Kiểm tra điều kiện gửi email ===
 if [ "$EMAIL_OPTION" = "no_email" ]; then
-  echo -e "\nEmail not sent, configuration not allowed."
-  echo "$(date +'%Y-%m-%d %H:%M:%S') - Email not sent, configuration not allowed." >> "$LOG_FILE"
+  echo "$(date +'%Y-%m-%d %H:%M:%S') - Email not sent: disabled in config." >> "$LOG_FILE"
   exit 0
-elif [ -z "${EMAIL_FROM}" ] || [ -z "${EMAIL_TO}" ]; then
-  # BUG FIX #5: Bỏ qua kiểm tra EMAIL_TO nếu EMAIL_OPTION là rclone
-  if [ "$EMAIL_OPTION" != "rclone" ]; then
-    echo -e "\nEmail configuration skipped (EMAIL_FROM or EMAIL_TO is empty)."
-    echo "$(date +'%Y-%m-%d %H:%M:%S') - Email configuration skipped (EMAIL_FROM or EMAIL_TO is empty)." >> "$LOG_FILE"
-    exit 0
-  fi
-elif ! $EMAIL_SERVICE_INSTALLED; then
-  if [ "$EMAIL_OPTION" != "rclone" ]; then
-    echo -e "\nNo email service installed (sendmail, exim4, postfix, etc.). Email not sent."
-    echo "$(date +'%Y-%m-%d %H:%M:%S') - No email service installed. Email not sent." >> "$LOG_FILE"
-    exit 0
-  fi
 fi
 
-# === Kiểm tra nếu đòi đính kèm nhưng không có file ===
+if [ "$EMAIL_OPTION" != "rclone" ] && { [ -z "$EMAIL_FROM" ] || [ -z "$EMAIL_TO" ]; }; then
+  echo "$(date +'%Y-%m-%d %H:%M:%S') - Email skipped: EMAIL_FROM or EMAIL_TO is empty." >> "$LOG_FILE"
+  exit 0
+fi
+
+if [ "$EMAIL_OPTION" != "rclone" ] && ! $EMAIL_SERVICE_INSTALLED; then
+  echo "$(date +'%Y-%m-%d %H:%M:%S') - Email not sent: no mail service installed." >> "$LOG_FILE"
+  exit 0
+fi
+
 if [ "$EMAIL_OPTION" = "attachments" ] && [ -z "$ATTACHMENT_FILES" ]; then
-  echo -e "\nNo valid attachment files. Email not sent."
-  echo "$(date +'%Y-%m-%d %H:%M:%S') - No valid attachment files. Email not sent." >> "$LOG_FILE"
+  echo "$(date +'%Y-%m-%d %H:%M:%S') - Email not sent: no attachment files." >> "$LOG_FILE"
   exit 0
 fi
 
-# === Kiểm tra giới hạn gửi mail của MTA ===
-MAIL_LIMIT_BYTES=0
-MAIL_AGENT="unknown"
+MAIL_LIMIT_BYTES=10485760
 
 if is_installed postfix; then
   MAIL_AGENT="postfix"
-  MAIL_LIMIT_BYTES=$(postconf -h message_size_limit 2>/dev/null || echo 10240000)
+  MAIL_LIMIT_BYTES=$(postconf -h message_size_limit 2>/dev/null || echo 10485760)
 elif is_installed exim || is_installed exim4; then
   MAIL_AGENT="exim"
-  MAIL_LIMIT_BYTES=10240000
 elif is_installed sendmail; then
   MAIL_AGENT="sendmail"
-  MAIL_LIMIT_BYTES=10240000
 else
-  MAIL_LIMIT_BYTES=10240000
+  MAIL_AGENT="unknown"
 fi
 
-# === Tính tổng kích thước đính kèm ===
 TOTAL_ATTACH_SIZE=0
 for file in $ATTACHMENT_FILES; do
-  if [ -f "$file" ]; then
-    FILE_SIZE=$(stat -c %s "$file")
-    TOTAL_ATTACH_SIZE=$((TOTAL_ATTACH_SIZE + FILE_SIZE))
-  fi
+  [ -f "$file" ] && TOTAL_ATTACH_SIZE=$((TOTAL_ATTACH_SIZE + $(stat -c %s "$file")))
 done
 
-# === Nếu vượt quá giới hạn thì tắt đính kèm ===
 if [ "$EMAIL_OPTION" = "attachments" ] && [ "$TOTAL_ATTACH_SIZE" -gt "$MAIL_LIMIT_BYTES" ]; then
-  echo -e "\nAttachment size exceeds limit of $MAIL_AGENT ($((MAIL_LIMIT_BYTES / 1024 / 1024))MB). Only sending log."
-  echo "$(date +'%Y-%m-%d %H:%M:%S') - Attachment too large ($((TOTAL_ATTACH_SIZE / 1024 / 1024))MB), exceeds $MAIL_AGENT limit. Sending only log." >> "$LOG_FILE"
+  echo "$(date +'%Y-%m-%d %H:%M:%S') - Attachments too large ($((TOTAL_ATTACH_SIZE/1024/1024))MB), switching to no_attachments." >> "$LOG_FILE"
   ATTACHMENT_FILES=""
   EMAIL_OPTION="no_attachments"
 fi
 
-# === Xây dựng danh sách file đính kèm ===
 ATTACHMENTS=""
 for file in $ATTACHMENT_FILES; do
   if [ -f "$file" ]; then
     ATTACHMENTS="$ATTACHMENTS -A $file"
   else
-    echo -e "\nAttachment file not found: $file"
-    echo "$(date +'%Y-%m-%d %H:%M:%S') - Attachment file not found: $file" >> "$LOG_FILE"
+    echo "$(date +'%Y-%m-%d %H:%M:%S') - Attachment not found: $file" >> "$LOG_FILE"
   fi
 done
 
-# === Gửi email ===
 SUBJECT="MySQL Backup Report - $DATE"
 BODY="MySQL Backup Log - $DATE\n$(cat "$LOG_FILE")"
 
 if [ "$EMAIL_OPTION" = "attachments" ]; then
-  if supports_mail_attach; then
-    if [ -n "$ATTACHMENTS" ]; then
-      echo -e "$BODY" | mail -s "$SUBJECT" -a "From: $EMAIL_FROM" $ATTACHMENTS "$EMAIL_TO"
-      echo "$(date +'%Y-%m-%d %H:%M:%S') - Email sent with all attachments." >> "$LOG_FILE"
-      echo -e "\nEmail sent with all attachments."
-    else
-      echo "$(date +'%Y-%m-%d %H:%M:%S') - No valid attachments found. Email not sent." >> "$LOG_FILE"
-      echo -e "\nNo valid attachments found. Email not sent."
-    fi
+  if supports_mail_attach && [ -n "$ATTACHMENTS" ]; then
+    echo -e "$BODY" | mail -s "$SUBJECT" -a "From: $EMAIL_FROM" $ATTACHMENTS "$EMAIL_TO"
+    echo "$(date +'%Y-%m-%d %H:%M:%S') - Email sent with attachments." >> "$LOG_FILE"
   elif is_installed mutt; then
     echo -e "$BODY" | mutt -s "$SUBJECT" -e "set from=\"$EMAIL_FROM\"" -a $ATTACHMENT_FILES -- "$EMAIL_TO"
-    echo "$(date +'%Y-%m-%d %H:%M:%S') - Email sent with attachments using mutt." >> "$LOG_FILE"
-    echo -e "\nEmail sent with all attachments."
+    echo "$(date +'%Y-%m-%d %H:%M:%S') - Email sent with attachments via mutt." >> "$LOG_FILE"
   else
-    echo "$(date +'%Y-%m-%d %H:%M:%S') - Neither mail -A nor mutt available. Email not sent." >> "$LOG_FILE"
+    echo "$(date +'%Y-%m-%d %H:%M:%S') - No suitable mail client for attachments." >> "$LOG_FILE"
   fi
 
 elif [ "$EMAIL_OPTION" = "no_attachments" ]; then
   echo -e "$BODY" | mail -s "$SUBJECT" -a "From: $EMAIL_FROM" "$EMAIL_TO"
-  echo "$(date +'%Y-%m-%d %H:%M:%S') - Email notification has been sent (No attachments)." >> "$LOG_FILE"
-  echo -e "\nEmail notification has been sent (No attachments)."
+  echo "$(date +'%Y-%m-%d %H:%M:%S') - Email sent (no attachments)." >> "$LOG_FILE"
 
 elif [ "$EMAIL_OPTION" = "rclone" ]; then
-  # Danh sách domain - được đọc từ config (RCLONE_SITES) hoặc dùng mặc định
-  if [ -n "$RCLONE_SITES" ]; then
-    # Đọc từ biến config: chuỗi phân cách bởi dấu phẩy → array
-    IFS=',' read -ra SITES <<< "$RCLONE_SITES"
-  fi
-
-  # Tên remote rclone (đọc từ config hoặc mặc định là "gdrive")
   RCLONE_REMOTE="${RCLONE_REMOTE:-gdrive}"
 
-  # Kiểm tra rclone đã được cấu hình remote chưa
   if ! rclone listremotes 2>/dev/null | grep -q "^${RCLONE_REMOTE}:"; then
-    echo "$(date +'%Y-%m-%d %H:%M:%S') - ERROR: rclone remote '${RCLONE_REMOTE}' not configured. Run: rclone config" >> "$LOG_FILE"
-    echo -e "\n[rclone] ERROR: Remote '${RCLONE_REMOTE}' not found. Please run 'rclone config' to set it up."
+    echo "$(date +'%Y-%m-%d %H:%M:%S') - ERROR: rclone remote '${RCLONE_REMOTE}' not configured." >> "$LOG_FILE"
+    echo "[rclone] ERROR: Remote '${RCLONE_REMOTE}' not found. Run 'rclone config'."
     exit 1
   fi
+
+  IFS=',' read -ra SITES <<< "${RCLONE_SITES:-}"
 
   RCLONE_SUCCESS=0
   RCLONE_FAILED=0
@@ -169,24 +142,19 @@ elif [ "$EMAIL_OPTION" = "rclone" ]; then
     FILE_NAME=$(basename "$FILE")
     MATCHED=false
 
-    # Tìm domain phù hợp với tên file
     for SITE in "${SITES[@]}"; do
-      # Bỏ qua entry bị comment
       [[ "$SITE" =~ ^#.*$ ]] && continue
-      SITE=$(echo "$SITE" | xargs)  # trim spaces
+      SITE=$(echo "$SITE" | xargs)
       [ -z "$SITE" ] && continue
 
       SITE_NAME="${SITE%%.*}"
       if [[ "$FILE_NAME" == *"${SITE_NAME}"* ]]; then
-        # Kiểm tra và tạo thư mục Google Drive nếu chưa có
         if ! rclone lsf --dirs-only "${RCLONE_REMOTE}:" 2>/dev/null | grep -q "^${SITE}/$"; then
-          echo "$(date +'%Y-%m-%d %H:%M:%S') - [rclone] Creating folder on ${RCLONE_REMOTE}: $SITE" >> "$LOG_FILE"
           rclone mkdir "${RCLONE_REMOTE}:${SITE}" 2>>"$LOG_FILE"
         fi
 
-        # Upload file vào thư mục tương ứng
-        echo "$(date +'%Y-%m-%d %H:%M:%S') - [rclone] Uploading: $FILE_NAME → ${RCLONE_REMOTE}:${SITE}/" >> "$LOG_FILE"
-        echo "[rclone] Uploading: $FILE_NAME → ${RCLONE_REMOTE}:${SITE}/"
+        echo "$(date +'%Y-%m-%d %H:%M:%S') - [rclone] Uploading: $FILE_NAME -> ${RCLONE_REMOTE}:${SITE}/" >> "$LOG_FILE"
+        echo "[rclone] Uploading: $FILE_NAME -> ${RCLONE_REMOTE}:${SITE}/"
 
         if rclone copy "$FILE" "${RCLONE_REMOTE}:${SITE}/" \
           --retries 5 \
@@ -206,24 +174,18 @@ elif [ "$EMAIL_OPTION" = "rclone" ]; then
       fi
     done
 
-    # BUG FIX #6: File không khớp domain nào → ghi log thay vì bỏ qua im lặng
     if [ "$MATCHED" = false ]; then
-      echo "$(date +'%Y-%m-%d %H:%M:%S') - [rclone] WARNING: No matching site for file: $FILE_NAME" >> "$LOG_FILE"
-      echo "[rclone] WARNING: No matching site for file: $FILE_NAME"
+      echo "$(date +'%Y-%m-%d %H:%M:%S') - [rclone] WARNING: No matching site for: $FILE_NAME" >> "$LOG_FILE"
+      echo "[rclone] WARNING: No matching site for: $FILE_NAME"
     fi
   done
 
-  # Gửi email thông báo (nếu có EMAIL_TO và mail service)
   if [ -n "$EMAIL_TO" ] && $EMAIL_SERVICE_INSTALLED; then
-    RCLONE_SUMMARY="Rclone upload summary: $RCLONE_SUCCESS success, $RCLONE_FAILED failed."
-    echo -e "$BODY\n\n✅ $RCLONE_SUMMARY" | \
-    mail -s "$SUBJECT" -a "From: $EMAIL_FROM" "$EMAIL_TO"
+    RCLONE_SUMMARY="Rclone upload: $RCLONE_SUCCESS success, $RCLONE_FAILED failed."
+    echo -e "$BODY\n\n$RCLONE_SUMMARY" | mail -s "$SUBJECT" -a "From: $EMAIL_FROM" "$EMAIL_TO"
     echo "$(date +'%Y-%m-%d %H:%M:%S') - Email notification sent after rclone upload." >> "$LOG_FILE"
-  else
-    echo "$(date +'%Y-%m-%d %H:%M:%S') - [rclone] Email skipped (no EMAIL_TO or no mail service)." >> "$LOG_FILE"
   fi
 
-  echo "$(date +'%Y-%m-%d %H:%M:%S') - Rclone upload complete. Success: $RCLONE_SUCCESS, Failed: $RCLONE_FAILED." >> "$LOG_FILE"
-  echo "Rclone upload done. Success: $RCLONE_SUCCESS, Failed: $RCLONE_FAILED."
-
+  echo "$(date +'%Y-%m-%d %H:%M:%S') - Rclone done. Success: $RCLONE_SUCCESS, Failed: $RCLONE_FAILED." >> "$LOG_FILE"
+  echo "Rclone done. Success: $RCLONE_SUCCESS, Failed: $RCLONE_FAILED."
 fi

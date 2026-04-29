@@ -1,5 +1,10 @@
 #!/bin/bash
 
+if [ "$EUID" -ne 0 ]; then
+  echo "Please run as root: sudo bash install.sh"
+  exit 1
+fi
+
 echo "======================================"
 echo "  Auto SQL Backup - Setup Wizard"
 echo "======================================"
@@ -7,21 +12,21 @@ echo ""
 echo "1) Tieng Viet"
 echo "2) English"
 echo ""
-read -p "Chon ngon ngu / Select language [1/2, default: 2]: " LANG_CHOICE
-LANG_CHOICE=$(echo "$LANG_CHOICE" | xargs)
-LANG_CHOICE=${LANG_CHOICE:-2}
+read -p "Chon ngon ngu / Select language [1/2, default: 2]: " BACKUP_LANG_CHOICE
+BACKUP_LANG_CHOICE=$(echo "$BACKUP_LANG_CHOICE" | xargs)
+BACKUP_LANG_CHOICE=${BACKUP_LANG_CHOICE:-2}
 
-if [ "$LANG_CHOICE" = "1" ]; then
-  LANG="vi"
+if [ "$BACKUP_LANG_CHOICE" = "1" ]; then
+  BACKUP_LANG="vi"
 else
-  LANG="en"
+  BACKUP_LANG="en"
 fi
 
 msg() {
   local key="$1"
   local txt=""
 
-  case "$LANG" in
+  case "$BACKUP_LANG" in
     vi)
       case "$key" in
         mysql_default_info)   txt="Auto SQL Backup dung user root mac dinh, vui long nhap thong tin." ;;
@@ -86,6 +91,13 @@ msg() {
         step4_copied)         txt="Da sao chep script vao $2 va cap quyen thuc thi." ;;
         step5_title)          txt="Buoc 5: Tao cau hinh chay hang ngay..." ;;
         rclone_saved)         txt="Da luu cau hinh rclone: remote=$2, sites=$3" ;;
+        confirm_title)        txt="--- Xac nhan cau hinh ---" ;;
+        confirm_dir)          txt="  Thu muc backup : $2" ;;
+        confirm_email_opt)    txt="  Phuong thuc    : $2" ;;
+        confirm_email_to)     txt="  Email nhan     : $2" ;;
+        confirm_rclone)       txt="  Rclone remote  : $2 | Sites: $3" ;;
+        confirm_prompt)       txt="Xac nhan va cai dat? (y/n, mac dinh: y): " ;;
+        confirm_abort)        txt="Da huy cai dat." ;;
         setup_done)           txt="Cai dat hoan tat! Backup se chay tu dong moi ngay." ;;
         setup_test)           txt="Ban co the chay thu bang lenh: sudo $2" ;;
         setup_missing)        txt="Mot so file bi thieu:" ;;
@@ -156,6 +168,13 @@ msg() {
         step4_copied)         txt="Backup script copied to $2 and set as executable." ;;
         step5_title)          txt="Step 5: Creating daily backup configuration..." ;;
         rclone_saved)         txt="Rclone config saved: remote=$2, sites=$3" ;;
+        confirm_title)        txt="--- Confirm Configuration ---" ;;
+        confirm_dir)          txt="  Backup directory : $2" ;;
+        confirm_email_opt)    txt="  Notification     : $2" ;;
+        confirm_email_to)     txt="  Recipient email  : $2" ;;
+        confirm_rclone)       txt="  Rclone remote    : $2 | Sites: $3" ;;
+        confirm_prompt)       txt="Confirm and install? (y/n, default: y): " ;;
+        confirm_abort)        txt="Installation aborted." ;;
         setup_done)           txt="Setup completed! All database backups are now scheduled to run daily." ;;
         setup_test)           txt="You can test it with: sudo $2" ;;
         setup_missing)        txt="One or more files are missing:" ;;
@@ -246,7 +265,6 @@ configure_rclone() {
     msg rclone_sites_done "$RCLONE_SITES"
   fi
 
-  # Hoi gui email kem
   echo ""
   read -p "$(prompt rclone_email_notify)" RCLONE_EMAIL_NOTIFY
   if [ "$RCLONE_EMAIL_NOTIFY" = "y" ] || [ "$RCLONE_EMAIL_NOTIFY" = "Y" ]; then
@@ -267,7 +285,7 @@ configure_rclone() {
 
 # KIEM TRA MYSQL
 DEFAULT_USER="root"
-SQL_USER=$(sudo mysql -u "$DEFAULT_USER" -e "exit" 2>&1)
+SQL_USER=$(mysql -u "$DEFAULT_USER" -e "exit" 2>&1)
 
 if echo "$SQL_USER" | grep -q "using password: NO"; then
   while true; do
@@ -285,7 +303,6 @@ if echo "$SQL_USER" | grep -q "using password: NO"; then
   while true; do
     read -sp "$(prompt mysql_enter_pass)" MYSQL_PASSWORD
     echo ""
-    MYSQL_PASSWORD=$(echo "$MYSQL_PASSWORD" | xargs)
     if [ -z "$MYSQL_PASSWORD" ]; then
       msg mysql_pass_empty
     else
@@ -417,7 +434,6 @@ if [ -n "$MAIL_SERVICE" ]; then
   fi
 
 else
-  # Khong co mail service
   echo ""
   msg no_mail_rclone_ask
   read -p "$(prompt no_mail_rclone_prmpt)" USE_RCLONE
@@ -434,59 +450,73 @@ else
   fi
 fi
 
+# XAC NHAN CAU HINH TRUOC KHI APPLY
+echo ""
+msg confirm_title
+msg confirm_dir "$BACKUP_DIR"
+msg confirm_email_opt "$EMAIL_OPTION"
+[ -n "$EMAIL_TO" ] && msg confirm_email_to "$EMAIL_TO"
+[ "$EMAIL_OPTION" = "rclone" ] && msg confirm_rclone "$RCLONE_REMOTE" "$RCLONE_SITES"
+echo ""
+read -p "$(prompt confirm_prompt)" CONFIRM
+CONFIRM=${CONFIRM:-y}
+if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
+  msg confirm_abort
+  exit 0
+fi
+
 # BUOC 4: CAI DAT SCRIPT
 echo ""
 msg step4_title
 
-CRON_DIR="/etc/cron.daily/"
-if echo "$PATH" | grep -q "/usr/local/bin"; then
-  EXECS_DIR="/usr/local/bin/"
-else
-  EXECS_DIR="${CRON_DIR}"
-fi
-
-EXECS_FILE="${EXECS_DIR}runsqlbackup"
-sudo cp ./runsqlbackup "$EXECS_FILE"
-sudo chmod +x "$EXECS_FILE"
+EXECS_FILE="/usr/local/bin/runsqlbackup"
+cp ./runsqlbackup "$EXECS_FILE"
+chmod +x "$EXECS_FILE"
 msg step4_copied "$EXECS_FILE"
 
 # BUOC 5: TAO CRON
+CRON_DIR="/etc/cron.daily"
+CRON_FILE="${CRON_DIR}/runsqlbackup"
 echo ""
 msg step5_title
-CRON_FILE="${CRON_DIR}runsqlbackup"
-echo "#!/bin/sh" > "${CRON_FILE}"
-echo "/usr/local/bin/runsqlbackup" >> "${CRON_FILE}"
-sudo chmod +x "${CRON_FILE}"
+echo "#!/bin/sh" | tee "$CRON_FILE" > /dev/null
+echo "/usr/local/bin/runsqlbackup" | tee -a "$CRON_FILE" > /dev/null
+chmod +x "$CRON_FILE"
 
-CONFIG_DIR="/etc/automysqlbackup/"
-CONFIG_FILE="${CONFIG_DIR}mysqlbackup.cnf"
-sudo mkdir -p "${CONFIG_DIR}"
-sudo cp ./mysqlbackup.cnf "$CONFIG_FILE"
-sudo cp ./sendmail "${CONFIG_DIR}/sendmail"
+CONFIG_DIR="/etc/automysqlbackup"
+CONFIG_FILE="${CONFIG_DIR}/mysqlbackup.cnf"
+mkdir -p "$CONFIG_DIR"
+cp ./mysqlbackup.cnf "$CONFIG_FILE"
+cp ./sendmail "${CONFIG_DIR}/sendmail"
+chmod 600 "$CONFIG_FILE"
 
 if [ "$BACKUP_DIR" != "/var/backups/db" ]; then
-  sudo sed -i "s|^#\?BACKUP_DIR=.*|BACKUP_DIR=\"$BACKUP_DIR\"|" "$CONFIG_FILE"
+  sed -i "s|^#\?BACKUP_DIR=.*|BACKUP_DIR=\"$BACKUP_DIR\"|" "$CONFIG_FILE"
 fi
 
-sudo sed -i "s|^#\?EMAIL_TO=.*|EMAIL_TO=\"$EMAIL_TO\"|" "$CONFIG_FILE"
-sudo sed -i "s|^#\?SENDER_NAME=.*|SENDER_NAME=\"$SENDER_NAME\"|" "$CONFIG_FILE"
-sudo sed -i "s|^#\?EMAIL_OPTION=.*|EMAIL_OPTION=\"$EMAIL_OPTION\"|" "$CONFIG_FILE"
+sed -i "s|^#\?EMAIL_TO=.*|EMAIL_TO=\"$EMAIL_TO\"|" "$CONFIG_FILE"
+sed -i "s|^#\?SENDER_NAME=.*|SENDER_NAME=\"$SENDER_NAME\"|" "$CONFIG_FILE"
+sed -i "s|^#\?EMAIL_OPTION=.*|EMAIL_OPTION=\"$EMAIL_OPTION\"|" "$CONFIG_FILE"
 
 if [ "$EMAIL_OPTION" = "rclone" ]; then
-  sudo sed -i '/^#\?RCLONE_REMOTE=/d' "$CONFIG_FILE"
-  sudo sed -i '/^#\?RCLONE_SITES=/d' "$CONFIG_FILE"
-  echo "RCLONE_REMOTE=\"${RCLONE_REMOTE}\"" | sudo tee -a "$CONFIG_FILE" > /dev/null
-  echo "RCLONE_SITES=\"${RCLONE_SITES}\"" | sudo tee -a "$CONFIG_FILE" > /dev/null
+  sed -i '/^#\?RCLONE_REMOTE=/d' "$CONFIG_FILE"
+  sed -i '/^#\?RCLONE_SITES=/d' "$CONFIG_FILE"
+  echo "RCLONE_REMOTE=\"${RCLONE_REMOTE}\"" | tee -a "$CONFIG_FILE" > /dev/null
+  echo "RCLONE_SITES=\"${RCLONE_SITES}\"" | tee -a "$CONFIG_FILE" > /dev/null
   msg rclone_saved "$RCLONE_REMOTE" "$RCLONE_SITES"
 fi
 
-# Revert credential trong file source
+# Revert credential trong source file (cleanup sau khi da copy vao CONFIG_DIR)
 sed -i "s|^#\?MYSQL_USER=.*|MYSQL_USER=\"$DEFAULT_USER\"|" "./mysqlbackup.cnf"
 sed -i "s|^#\?MYSQL_PASSWORD=.*|MYSQL_PASSWORD=\"\"|" "./mysqlbackup.cnf"
 
-# Xoa ky tu \r khi copy tu Windows
-sudo find "$CONFIG_DIR" -type f -exec sed -i 's/\r//g' {} \;
-sudo sed -i 's/\r//g' "$EXECS_FILE"
+# Xoa ky tu \r neu file duoc tao tren Windows
+find "$CONFIG_DIR" -type f -exec sed -i 's/\r//g' {} \;
+sed -i 's/\r//g' "$EXECS_FILE"
+
+# Apply permissions cho backup dir
+chmod 700 "$BACKUP_DIR"
+chown root:root "$BACKUP_DIR"
 
 echo ""
 if [ -f "$CONFIG_FILE" ] && [ -f "$CRON_FILE" ] && [ -f "$EXECS_FILE" ]; then
