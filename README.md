@@ -50,7 +50,7 @@ cd Auto-SQL-backups
 
 ```bash
 sudo chmod +x install.sh
-sudo ./install.sh
+sudo bash ./install.sh
 ```
 
 ### Bước 3: Chọn ngôn ngữ
