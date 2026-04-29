@@ -10,7 +10,7 @@ MYSQL_PASSWORD=""
 # Databases to be excluded from backup
 CONFIG_DB_EXCLUDE="mysql|information_schema|performance_schema|sys|test"
 
-# Email option: attachments, no_attachments, no_email
+# Email option: attachments, no_attachments, no_email, rclone
 EMAIL_OPTION="no_attachments"
 
 # Sender name for email notifications
@@ -18,3 +18,11 @@ SENDER_NAME="Admin"
 
 # Email address to receive notifications
 EMAIL_TO=""
+
+# Rclone remote name (e.g. gdrive, onedrive)
+# Chỉ dùng khi EMAIL_OPTION=rclone
+RCLONE_REMOTE="gdrive"
+
+# Danh sách domain phân cách bởi dấu phẩy
+# Ví dụ: RCLONE_SITES="nbblo.com,itsmeit.co"
+RCLONE_SITES=""
