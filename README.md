@@ -41,7 +41,6 @@ Auto-SQL-backups/
 ### Bước 1: Tải và giải nén
 
 ```bash
-cd /var/www/vhosts
 git clone https://github.com/loibv5989/Auto-SQL-backups.git
 cd Auto-SQL-backups
 ```
