@@ -15,5 +15,6 @@ EMAIL_TO=""
 
 RCLONE_REMOTE="gdrive"
 
-# Comma-separated list of site folders for rclone upload
+# Comma-separated list of folder names ON Google Drive to upload backups into.
+# Each name is a custom label you define — not a domain. E.g: nbblo,myproject,client-abc
 RCLONE_SITES=""
